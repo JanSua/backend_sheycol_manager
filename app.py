@@ -3,11 +3,15 @@ from flask_migrate import Migrate
 from config import Config
 from models import db, Credential, Task, Supplier, Order, Payment, Customer
 from flask_cors import CORS, cross_origin
+from flask_jwt_extended import JWTManager, create_access_token
 
 app = Flask(__name__)
-cors = CORS(app)  # allow CORS for all domains on all routes.
+cors = CORS(app)
 app.config['CORS_HEADERS'] = 'Content-Type'
 app.config.from_object(Config)
+
+# Configuración de JWT
+jwt = JWTManager(app)
 
 db.init_app(app)
 migrate = Migrate(app, db)
@@ -28,11 +32,16 @@ Funciona si se usa el endpoint create-user como POST, enviando user password y r
 @app.route('/create-user', methods=['POST'])
 def crear_usuario():
     data = request.json
-    nuevo = Credential(user=data['user'],
+    # Check if the user already exists
+    usuario_existente = Credential.query.filter_by(
+        username=data['username']).first()
+    if usuario_existente:
+        return jsonify({'mensaje': 'El usuario ya existe'}), 400
+
+    nuevo = Credential(username=data['username'],
                        password=data['password'],
                        role=data['role'],
                        )
-    print(nuevo)
     db.session.add(nuevo)
     db.session.commit()
     return jsonify({'mensaje': 'Usuario creado'}), 201
@@ -46,11 +55,24 @@ Funciona únicamente si se hace un GET y devuelve la lista de todos los usuarios
 @app.route('/list-users', methods=['GET'])
 def listar_usuarios():
     usuarios = Credential.query.all()
-    print(usuarios)
     return jsonify([
-        {'id': u.id, 'user': u.user, 'password': u.password, 'role': u.role}
+        {'id': u.id, 'user': u.username, 'password': u.password, 'role': u.role}
         for u in usuarios
     ])
+
+
+@app.route('/get-user/<username>', methods=['GET'])
+def obtener_usuario(username):
+    usuario = Credential.query.filter_by(username=username).first()
+    if usuario:
+        return jsonify({
+            'id': usuario.id,
+            'user': usuario.username,
+            'password': usuario.password,
+            'role': usuario.role
+        }), 200
+    else:
+        return jsonify({'mensaje': 'Usuario no encontrado'}), 404
 
 
 """
@@ -62,8 +84,7 @@ Funciona únicamente si se envía desde el Front el User
 def eliminar_usuario():
     data = request.json
     usuario_a_eliminar = Credential.query.filter_by(
-        user=data['user']).first()
-    print(usuario_a_eliminar)
+        username=data['username']).first()
     if usuario_a_eliminar:
         db.session.delete(usuario_a_eliminar)
         db.session.commit()
@@ -86,8 +107,8 @@ def actualizar_usuario():
         return jsonify({'mensaje': 'Usuario no encontrado'}), 404
 
     cambios = False
-    if 'user' in data and usuario.user != data['user']:
-        usuario.user = data['user']
+    if 'username' in data and usuario.username != data['username']:
+        usuario.username = data['username']
         cambios = True
     if 'password' in data and usuario.password != data['password']:
         usuario.password = data['password']
@@ -107,18 +128,19 @@ def actualizar_usuario():
 
 @app.route('/create-task', methods=['POST'])
 def crear_tarea():
+    current_user = get_jwt_identity()
     data = request.json
-    nueva = Task(name=data['name'],
-                 description=data['description'],
-                 status=data['status'],
-                 date=data['date'],
-                 created_date=data['created_date'],
-                 prior=data['prior'],
-                 comments=data['comments'],
-                 created_by=data['created_by'],
-                 completed=data['completed'],
-                 )
-    print(nueva)
+    nueva = Task(
+        name=data['name'],
+        description=data['description'],
+        status=data.get('status'),
+        due_date=data.get('due_date'),
+        created_date=data.get('created_date'),
+        priority=data['priority'],
+        comments=data.get('comments'),
+        created_by=data.get('created_by', current_user['id']),
+        completed=data.get('completed', False),
+    )
     db.session.add(nueva)
     db.session.commit()
     return jsonify({'mensaje': 'Tarea creada'}), 201
@@ -127,11 +149,41 @@ def crear_tarea():
 @app.route('/list-tasks', methods=['GET'])
 def listar_tareas():
     tareas = Task.query.all()
-    print(tareas)
     return jsonify([
-        {'id': u.id, 'nombre': u.name, 'descripción': u.description, 'estado': u.status}
-        for u in tareas
+        {
+            'id': t.id,
+            'name': t.name,
+            'description': t.description,
+            'status': t.status,
+            'due_date': t.due_date,
+            'created_date': t.created_date,
+            'priority': t.priority,
+            'comments': t.comments,
+            'created_by': t.created_by,
+            'completed': t.completed
+        }
+        for t in tareas
     ])
+
+
+@app.route('/get-task/<int:task_id>', methods=['GET'])
+def listar_tarea(task_id):
+    tarea = Task.query.filter_by(id=task_id).first()
+    if tarea:
+        return jsonify({
+            'id': tarea.id,
+            'name': tarea.name,
+            'description': tarea.description,
+            'status': tarea.status,
+            'due_date': tarea.due_date,
+            'created_date': tarea.created_date,
+            'priority': tarea.priority,
+            'comments': tarea.comments,
+            'created_by': tarea.created_by,
+            'completed': tarea.completed
+        }), 200
+    else:
+        return jsonify({'mensaje': 'Tarea no encontrada'}), 404
 
 
 @app.route('/update-task', methods=['POST'])
@@ -151,26 +203,17 @@ def actualizar_tarea():
     if 'status' in data and tarea.status != data['status']:
         tarea.status = data['status']
         cambios = True
-    if 'date' in data and tarea.date != data['date']:
-        tarea.date = data['date']
+    if 'due_date' in data and tarea.due_date != data['due_date']:
+        tarea.due_date = data['due_date']
         cambios = True
-    if 'created_date' in data and tarea.created_date != data['created_date']:
-        tarea.created_date = data['created_date']
-        cambios = True
-    if 'prior' in data and tarea.prior != data['prior']:
-        tarea.prior = data['prior']
+    if 'priority' in data and tarea.priority != data['priority']:
+        tarea.priority = data['priority']
         cambios = True
     if 'comments' in data and tarea.comments != data['comments']:
         tarea.comments = data['comments']
         cambios = True
     if 'created_by' in data and tarea.created_by != data['created_by']:
         tarea.created_by = data['created_by']
-        cambios = True
-    if 'assigned_to' in data and tarea.assigned_to != data['assigned_to']:
-        tarea.assigned_to = data['assigned_to']
-        cambios = True
-    if 'due_date' in data and tarea.due_date != data['due_date']:
-        tarea.due_date = data['due_date']
         cambios = True
     if 'completed' in data and tarea.completed != data['completed']:
         tarea.completed = data['completed']
@@ -237,6 +280,27 @@ def listar_proveedores():
         }
         for p in proveedores
     ])
+
+
+@app.route('/get-supplier/<int:supplier_id>', methods=['GET'])
+def obtener_proveedor(supplier_id):
+    proveedor = Supplier.query.filter_by(id=supplier_id).first()
+    if proveedor:
+        return jsonify({
+            'id': proveedor.id,
+            'company_name': proveedor.company_name,
+            'company_nit': proveedor.company_nit,
+            'contact_person': proveedor.contact_person,
+            'phone1': proveedor.phone1,
+            'phone2': proveedor.phone2,
+            'email': proveedor.email,
+            'supplier_type': proveedor.supplier_type,
+            'location': proveedor.location,
+            'address': proveedor.address,
+            'is_active': proveedor.is_active
+        }), 200
+    else:
+        return jsonify({'mensaje': 'Proveedor no encontrado'}), 404
 
 
 @app.route('/update-supplier', methods=['POST'])
@@ -321,6 +385,25 @@ def listar_ordenes():
     ])
 
 
+@app.route('/get-order/<int:order_id>', methods=['GET'])
+def obtener_orden(order_id):
+    orden = Order.query.filter_by(id=order_id).first()
+    if orden:
+        return jsonify({
+            'id': orden.id,
+            'order_number': orden.order_number,
+            'supplier_id': orden.supplier_id,
+            'supplier_name': orden.supplier.company_name,
+            'order_date': orden.order_date,
+            'delivery_date': orden.delivery_date,
+            'total_amount': orden.total_amount,
+            'status': orden.status,
+            'comments': orden.comments
+        }), 200
+    else:
+        return jsonify({'mensaje': 'Orden no encontrada'}), 404
+
+
 @app.route('/update-order', methods=['POST'])
 def actualizar_orden():
     data = request.json
@@ -395,6 +478,25 @@ def listar_pagos():
         }
         for p in pagos
     ])
+
+
+@app.route('/get-payment/<int:payment_id>', methods=['GET'])
+def obtener_pago(payment_id):
+    pago = Payment.query.filter_by(id=payment_id).first()
+    if pago:
+        return jsonify({
+            'id': pago.id,
+            'order_id': pago.order_id,
+            'supplier_id': pago.supplier_id,
+            'supplier_name': pago.supplier.company_name,
+            'payment_date': pago.payment_date,
+            'amount': pago.amount,
+            'payment_method': pago.payment_method,
+            'status': pago.status,
+            'comments': pago.comments
+        }), 200
+    else:
+        return jsonify({'mensaje': 'Pago no encontrado'}), 404
 
 
 @app.route('/update-payment', methods=['POST'])
@@ -474,6 +576,25 @@ def listar_clientes():
     ])
 
 
+@app.route('/get-customer/<int:customer_id>', methods=['GET'])
+def obtener_cliente(customer_id):
+    cliente = Customer.query.filter_by(id=customer_id).first()
+    if cliente:
+        return jsonify({
+            'id': cliente.id,
+            'full_name': cliente.full_name,
+            'phone': cliente.phone,
+            'email': cliente.email,
+            'address': cliente.address,
+            'has_pending_balance': cliente.has_pending_balance,
+            'pending_balance_amount': cliente.pending_balance_amount,
+            'pending_since': cliente.pending_since,
+            'comments': cliente.comments
+        }), 200
+    else:
+        return jsonify({'mensaje': 'Cliente no encontrado'}), 404
+
+
 @app.route('/update-customer', methods=['POST'])
 def actualizar_cliente():
     data = request.json
@@ -512,6 +633,28 @@ def eliminar_cliente():
         return jsonify({'mensaje': 'Cliente eliminado'}), 200
     else:
         return jsonify({'mensaje': 'Cliente no encontrado'}), 404
+
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+
+    usuario = Credential.query.filter_by(username=username).first()
+    if not usuario:
+        return jsonify({'mensaje': 'Usuario no encontrado'}), 404
+
+    if usuario.password != password:
+        return jsonify({'mensaje': 'Contraseña incorrecta'}), 401
+
+    access_token = create_access_token(
+        identity={"id": usuario.id, "role": usuario.role})
+    return jsonify({
+        'mensaje': 'Login exitoso',
+        'role': usuario.role,
+        'access_token': access_token
+    }), 200
 
 
 if __name__ == '__main__':
